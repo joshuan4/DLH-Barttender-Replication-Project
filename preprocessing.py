@@ -12,7 +12,7 @@ from tqdm import tqdm
 from typing import List, Dict
 import os
 from barttender.CardiomegalyBiomarkers.Cardiomegaly_Classification.src.data_pipeline_functions import (x_ray_dataframe_generator_v2, icu_xray_matcher_v2)
-
+from barttender.CardiomegalyBiomarkers.Cardiomegaly_Classification.src.data_pipeline_functions import dfCleaningNoIDP, SignalTableGeneratorNoIDP
 
 # File Paths
 mimic_iv_path = 'physionet.org/files/mimiciv/3.1/'
@@ -38,7 +38,7 @@ relevant_lab_events_save_path = feature_folder + 'RelevantLabEvents.pkl'
 df_icu_xray_path =  feature_folder + 'IcuXrayMatched.pkl'
 
 # Final cleaned features
-features_path = feature_folder + 'MIMIC_features.pkl'
+features_path = feature_folder + 'MIMIC_features_v3.pkl'
 
 # General Parameters
 label = 'Cardiomegaly'  # Define label of target disease ('Atelectasis', 'Cardiomegaly', 'Consolidation', 'Edema', 'Enlarged Cardiomediastinum', 'Fracture', 'Lung Lesion', 'Lung Opacity', 'No Finding', 'Pleural Effusion', 'Pleural Other', 'Pneumonia', 'Pneumothorax', 'Support Devices')
@@ -48,7 +48,7 @@ chunk_size = 10**7      # When extracting relevant lab and chart events we itera
 view = 'PA'     # Choose the X-ray view position you're interested in, AP or PA
 
 # MIMIC-IV (non-imaging) Parameters
-MIMIC_IV_version = 2            # Version of MIMIC-IV downloaded
+MIMIC_IV_version = 3            # Version of MIMIC-IV downloaded
 days_before_icu = 365           # The number of days before ICU admission that we look for x-rays in
 xray_gap_after_icu = 0          # You can choose to include a 'gap' after ICU discharge in which you don't look for any X-rays
 xray_max_time_after_icu = 90    # If you don't want a gap, xray_max_time_after_icu is just the number of days after ICU discharge that we look for x-rays in. We look for x-rays which are between Gap and Gap + xray_max_time_after_icu days after out-time
@@ -247,3 +247,33 @@ if not os.path.exists(df_icu_xray_path):
     df_icu_xray_v2.to_pickle(df_icu_xray_path)
 else:
     print(f'{df_icu_xray_path} already exists.')
+
+df_patients = pd.read_csv(patients_table_path)
+df_admissions = pd.read_csv(admissions_table_path)
+df_icu_xray = pd.read_pickle(df_icu_xray_path)
+df_icu_lab = pd.read_pickle(relevant_lab_events_save_path)
+df_icu_timeseries = pd.read_pickle(relevant_chart_events_save_path)
+
+# edit name of df_admissions column if data taken from versions after MIMIC-IV v1.0 as 'ethnicity' column was renamed 'race' in following version (v2.0)
+if MIMIC_IV_version != 1:
+    df_admissions.rename(columns={'race':'ethnicity'}, inplace=True)
+
+if not os.path.exists(features_path):
+    # collate all features (MIMIC-IV feautres, MIMIC-CXR file paths, biomarker values) into one master table
+    df_master = SignalTableGeneratorNoIDP(df_icu_xray, 
+                                    df_icu_timeseries=df_icu_timeseries, 
+                                    df_icu_lab=df_icu_lab, 
+                                    df_patients=df_patients, 
+                                    df_admissions=df_admissions, 
+                                    chart_labels_mean=chart_labels_mean, 
+                                    chart_labels_max=chart_labels_max, 
+                                    chart_labels_min=chart_labels_min, 
+                                    lab_labels_mean=lab_labels_mean, 
+                                    lab_labels_max=lab_labels_max, 
+                                    lab_labels_min=lab_labels_min, 
+                                    average_by=average_by)
+
+    df_master_cleaned = dfCleaningNoIDP(df_master)
+    df_master_cleaned.to_pickle(features_path)
+else:
+    print(f'{features_path} already exists.')
