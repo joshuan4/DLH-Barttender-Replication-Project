@@ -1,6 +1,10 @@
 .venv/
 venv/
-physionet.org/
+physionet.org/files/
+physionet.org/outputs/cardiomegaly/mimic/
+physionet.org/outputs/cardiomegaly/wandb/
+physionet.org/Mimic_features/RelevantChartEvents.pkl
+physionet.org/Mimic_features/RelevantLabEvents.pkl
 barttender/
 wandb/
 __pycache__
