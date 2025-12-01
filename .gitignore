@@ -2,3 +2,6 @@
 venv/
 physionet.org/
 barttender/
+wandb/
+__pycache__
+barttender_replication_outputs/outputs/cardiomegaly/mimic/

@@ -1,0 +1,464 @@
+# Copy of barttender.mimic_constants.py, updating function file pathing as necessary
+import pandas as pd
+from pathlib import Path
+import os
+import re
+import glob 
+import torch
+import numpy as np
+import pandas as pd
+import torch.nn as nn
+import pytorch_lightning as pl
+import torch.nn.functional as F
+import torchvision.models as models
+from sklearn.model_selection import train_test_split
+from pathlib import Path
+
+# Updated paths for user environment
+home_out_dir = Path('physionet.org/outputs/cardiomegaly')
+scratch_dir  = Path('physionet.org/files/mimic-cxr-jpg/2.1.0')  # MIMIC-CXR-JPG images
+nb_group_dir = Path('physionet.org/files/mimic-cxr-jpg/2.1.0/preprocessed')  # Preprocessed images directory
+
+# Import cleaned master dataframe
+feature_folder = Path('physionet.org/Mimic_features/')
+
+# Updating functions with new file paths
+def get_master_df(idp=False):
+    if idp:
+        # (2662, 104)
+        return pd.read_pickle('barttender/CardiomegalyBiomarkers/Cardiomegaly_Classification/MIMIC_features_OG/MIMIC_features.pkl')
+    return pd.read_pickle('physionet.org/Mimic_features/MIMIC_features_v3.pkl')
+
+def get_cardiomegaly_df(idp=False):
+    df = None
+    if idp:
+        df = pd.read_pickle('barttender/CardiomegalyBiomarkers/Cardiomegaly_Classification/MIMIC_features_OG/MIMIC_features.pkl')
+    else:
+        df = pd.read_pickle('physionet.org/Mimic_features/MIMIC_features_v3.pkl')
+    return df[df['Cardiomegaly'].isin([0, 1])]
+
+def df_train_test_split(df, test_size=0.2, val_size=0.1):
+    # Pre-select test samples
+    test_set = df[df['split'] == 'test']
+
+    # Remaining data (not in the test set)
+    remaining_df = df[df['split'] != 'test']
+
+    # Group remaining data by 'subject_id'
+    grouped = remaining_df.groupby('subject_id')
+
+    # Ensure each subject is fully in one of the splits
+    subjects = grouped.first().index
+
+    # Determine split sizes
+    total_remaining = len(remaining_df)
+    num_test = len(test_set)
+    adjusted_test_size = round(test_size - (num_test / len(df)), 2)
+    adjusted_train_size = round(1 - adjusted_test_size - val_size, 2)
+
+    # Perform stratified train/val/test split based on subject_id
+    train_subjects, val_test_subjects = train_test_split(subjects,
+                                                         test_size=round(val_size + adjusted_test_size, 2),
+                                                         train_size=adjusted_train_size,
+                                                         random_state=42)
+
+    val_subjects, new_test_subjects = train_test_split(val_test_subjects,
+                                                       test_size=round(adjusted_test_size / (val_size + adjusted_test_size), 2),
+                                                       train_size=round(val_size / (val_size + adjusted_test_size), 2),
+                                                       random_state=42)
+
+    # Build the final splits
+    train_set = remaining_df[remaining_df['subject_id'].isin(train_subjects)]
+    val_set = remaining_df[remaining_df['subject_id'].isin(val_subjects)]
+    new_test_set = remaining_df[remaining_df['subject_id'].isin(new_test_subjects)]
+
+    # Combine pre-selected test set with the newly created test set
+    final_test_set = pd.concat([test_set, new_test_set])
+
+    # Add the split labels to the sets
+    train_set.loc[:, 'split'] = 'train'
+    val_set.loc[:, 'split'] = 'val'
+    final_test_set.loc[:, 'split'] = 'test'
+
+    return train_set.reset_index(drop=True), val_set.reset_index(drop=True), final_test_set.reset_index(drop=True)
+
+# includes those with a high number of NaNs
+significant_variables_all = ['age_val', 'RR_mean', 'Chloride_mean', 'Urea_Nitrogren_mean', 'SaO2_mean', \
+    'PTT_mean', 'Magnesium_mean', 'PO2_mean', 'PCO2_mean', 'Lactate_mean', 'Phosphate_mean', 'Glucose_mean', 'FiO2_mean', 'PH_mean']
+
+# includes only those with a small number of NaNs
+significant_variables = ['age_val', 'Chloride_mean', 'RR_mean', 'Urea_Nitrogren_mean', 'Magnesium_mean', 'Glucose_mean', 'Phosphate_mean', 'Hematocrit_mean']
+
+lr_variables_all = [
+    'Temp(F)_mean',
+    'Sodium_mean',
+    'PlateletCount_mean',
+    'HR_mean',
+    'NBPm_mean',
+    'NBPs_mean',
+    'RR_mean',
+    'SpO2_mean',
+    'NBPd_mean',
+    'Glucose_mean',
+    'Creatinine_mean',
+    'Chloride_mean',
+    'Magnesium_mean',
+    'PTT_mean',
+    'Calcium_Total_mean',
+    'Phosphate_mean',
+    'Urea_Nitrogren_mean',
+    'Hematocrit_mean',
+    'Potassium_mean'
+]
+
+significant_variables_areas = {
+    'image': slice(None, 185),
+	'age_bar': slice(185, 188),
+	'chloride_bar': slice(188, 193),
+	'rr_bar': slice(193, 198),
+	'urea_nitrogen_bar': slice(198, 203),
+	'magnesium_bar': slice(203, 209),
+	'glucose_bar': slice(209, 214),
+	'phosphate_bar': slice(214, 219),
+	'hematocrit_bar': slice(219, None)
+}
+
+def get_significant_variables_areas(image_type):
+    return {
+        f'{image_type}': slice(None, 185),
+	    'age_bar': slice(185, 188),
+	    'chloride_bar': slice(188, 193),
+	    'rr_bar': slice(193, 198),
+	    'urea_nitrogen_bar': slice(198, 203),
+	    'magnesium_bar': slice(203, 209),
+	    'glucose_bar': slice(209, 214),
+	    'phosphate_bar': slice(214, 219),
+	    'hematocrit_bar': slice(219, None)
+    }
+
+z_scores = {
+    "Cardiomegaly": {
+        'age': 15.3406,
+        'urea_nitrogen': -11.3091,
+        'chloride': 11.1641,
+        'rr': 6.8814,
+        'magnesium': 5.1887,
+        'glucose': -3.7193,
+        'phosphate': 3.3469,
+        'hematocrit': -3.2741
+    }
+}
+
+# Labels
+chart_labels_mean = {
+    220045: 'HR_mean',
+    220277: 'SpO2_mean',
+    223761: 'Temp(F)_mean',
+    220210: 'RR_mean',
+    220052: 'ABPm_mean',
+    220051: 'ABPd_mean',
+    220050: 'ABPs_mean',
+    220180: 'NBPd_mean',
+    220181: 'NBPm_mean',
+    220179: 'NBPs_mean',
+    223835: 'FiO2_mean',
+    220274: 'PH_mean',
+    220235: 'PCO2_mean',
+    220227: 'SaO2_mean',
+    227457: 'PlateletCount_mean',
+    227456: 'Albumin_mean',
+    220603: 'Cholesterol_mean',
+    220645: 'Sodium_mean',
+    220224: 'PO2_mean',
+}
+
+chart_labels_max = {
+    220045: 'HR_max',
+    220210: 'RR_max',
+    220052: 'ABPm_max',
+    220051: 'ABPd_max',
+    220050: 'ABPs_max',
+    220180: 'NBPd_max',
+    220181: 'NBPm_max',
+    220179: 'NBPs_max',
+    223835: 'FiO2_max',
+    220235: 'PCO2_max',
+    220645: 'Sodium_max',
+}
+
+chart_labels_min = {
+    220045: 'HR_min',
+    220277: 'SpO2_min',
+    220210: 'RR_min',
+    220052: 'ABPm_min',
+    220051: 'ABPd_min',
+    220050: 'ABPs_min',
+    220180: 'NBPd_min',
+    220181: 'NBPm_min',
+    220179: 'NBPs_min',
+    220235: 'PCO2_min',
+    220645: 'Sodium_min',
+}
+
+lab_labels_mean = {
+    50826: 'Tidal_Volume_mean',
+    51006: 'Urea_Nitrogren_mean',
+    50863: 'Alkaline_Phosphatase_mean',
+    50893: 'Calcium_Total_mean',
+    50902: 'Chloride_mean',
+    50931: 'Glucose_mean',
+    50813: 'Lactate_mean',
+    50960: 'Magnesium_mean',
+    50970: 'Phosphate_mean',
+    50971: 'Potassium_mean',
+    50885: 'Bilirubin',
+    51003: 'Troponin-T_mean',
+    51221: 'Hematocrit_mean',
+    50811: 'Hemoglobin_mean',
+    50861: 'ALT_mean',
+    50912: 'Creatinine_mean',
+    51275: 'PTT_mean',
+    51516: 'WBC_mean',
+    51214: 'Fibrinogen',
+}
+
+lab_labels_max = {
+    50971: 'Potassium_max',
+    51003: 'Troponin-T_max',
+    50811: 'Hemoglobin_max',
+    51516: 'WBC_max',
+}
+
+lab_labels_min = {
+    50971: 'Potassium_min',
+    50811: 'Hemoglobin_min',
+    51516: 'WBC_min',
+}
+
+# Aggregation of all laboratory items into LabItems
+LabItems = dict(lab_labels_mean)
+LabItems.update(lab_labels_max)
+LabItems.update(lab_labels_min)
+
+# Aggregation of the vital signs / chart items into ChartItems
+ChartItems = dict(chart_labels_mean)
+ChartItems.update(chart_labels_max)
+ChartItems.update(chart_labels_min)
+
+indexing_cols = ['subject_id', 'study_id']
+imaging_cols  = ['ViewPosition', 'path']
+icu_cols = ['hadm_id', 'stay_id', 'first_careunit', 'last_careunit', 'intime', 'outtime', 'los', 'Match',\
+    'EarlyBoundary', 'PostGapStart', 'PostGapStop']
+label_cols = ['No Finding', 'Enlarged Cardiomediastinum', 'Cardiomegaly', 'Lung Opacity', 'Lung Lesion', \
+    'Edema', 'Consolidation', 'Pneumonia', 'Atelectasis', 'Pneumothorax', 'Pleural Effusion', 'Pleural Other',\
+    'Fracture', 'Support Devices']
+demographic_cols = ['ethnicity', 'anchor_age', 'anchor_year', 'gender']
+chart_labels_mean_cols = list(chart_labels_mean.values())
+chart_labels_max_cols  = list(chart_labels_max.values())
+chart_labels_min_cols  = list(chart_labels_min.values())
+lab_labels_mean_cols   = list(lab_labels_mean.values())
+lab_labels_max_cols    = list(lab_labels_max.values())
+lab_labels_min_cols    = list(lab_labels_min.values())
+
+stats_header = ['filename', 'area', 'mean', 'min', '25th_percentile', 'median',
+               '75th_percentile', 'max', 'std_mean', 'std_median']
+
+stats_header_debug = ['filename', 'area', 'mean', 'min', '25th_percentile', 'median',
+               '75th_percentile', 'max', 'std_mean', 'std_median', 'mean_w_frac', 'mean_w_iou', 'fraction_attn_area', 'iou']
+
+k_fold_run_id = {'xray' : 'wqzq428c',
+'noise': 'jfpf2s6m',
+'blank': 'yxa5wmrg'}
+
+def rgb2gray(rgb):
+    return np.dot(rgb[...,:3], [0.2989, 0.5870, 0.1140])
+
+def get_barcode_order_info(order=None, no_bars=False, nan=False, only_bars=False, bar_variables=significant_variables):
+    if no_bars:
+        return None, 'no_bars'
+    if nan:
+        bar_variables=significant_variables_all
+    if only_bars:
+        bar_variables=lr_variables_all
+    og_order = np.array(bar_variables)
+    order = [int(x) for x in order.strip('[]').split(',')] if isinstance(order, str) else order
+    order = list(range(len(bar_variables))) if order is None else order
+    suffix = '_'.join(og_order[order]).replace('_mean', '').replace('_val', '').lower()
+    return order, suffix
+
+def get_preproc_subpath(image_type, suffix):
+    return Path(f'preproc_224x224_{image_type}_{suffix}')
+
+def get_mask_save_dir_path(image_type, suffix, mask_type, label):
+    return nb_group_dir / f'{image_type}_{suffix}/{mask_type}/{mask_type}_{label.lower().replace(" ", "_")}_maps/'
+
+def get_mask_stats_csv_path(image_type, suffix, mask_type, label):
+    return nb_group_dir / f'{image_type}_{suffix}/{mask_type}/{mask_type}_{label.lower().replace(" ", "_")}_stats.csv'
+
+def get_mask_stats_csv(image_type, suffix, mask_type, label):
+    return pd.read_csv(get_mask_stats_csv_path(image_type, suffix, mask_type, label), names=stats_header_debug)
+
+def sanity_check_stats_csv(stats_df, areas=significant_variables_areas):
+    total_len = stats_df.shape[0]
+    for key in areas.keys():
+        len_non_zero = stats_df[(stats_df['area'] == key) & (stats_df['mean'] > 0)].shape[0]
+        print(f"For {key}: {len_non_zero} samples out of {total_len} are non-zero.")
+
+def get_correct_root_dir(sub_path):
+    if (scratch_dir / sub_path).exists():
+        return scratch_dir
+    if (nb_group_dir / sub_path).exists():
+        return nb_group_dir
+    return ''
+
+def construct_preproc_path(og_path: str, root_dir: Path, preproc_dir=None):
+    split = og_path.split("/")
+    preproc_filename = f"{split[2]}_{split[3]}_{split[4]}"
+    if preproc_dir:
+        return root_dir / preproc_dir / preproc_filename
+    else:
+        return root_dir / preproc_filename
+
+def construct_preproc_path_str(og_path: str, root_dir: Path, preproc_dir=None):
+    return construct_preproc_path(og_path, root_dir, preproc_dir).as_posix()
+
+def df_add_preproc_path_col(df, data_dir, preproc_dir):
+    df['path_preproc'] = df['path'].apply(construct_preproc_path_str, args=(data_dir, preproc_dir))
+    return df
+
+def get_merged_stats_sample_df(image_type, suffix, mask_type, label, split, idp):
+    df = get_master_df(idp)
+    stats_df = get_mask_stats_csv(image_type, suffix, mask_type, label)
+    preproc_dir = get_preproc_subpath(image_type, suffix)
+    root_dir = get_correct_root_dir(preproc_dir)
+    df = df_add_preproc_path_col(df, root_dir, preproc_dir)
+    df['path_mask'] = df['path_preproc'].apply(lambda path_preproc: (get_mask_save_dir_path(image_type, suffix, mask_type, label) / os.path.basename(path_preproc).replace('.jpg', '.npy')).as_posix())
+    merged_df = stats_df.merge(df.rename(columns={'path_mask': 'filename'}), how='left', on='filename')
+    return merged_df
+
+def get_newest_wandb_run_id(img_type_order):
+    # Pattern to match directories
+    pattern = re.compile(rf'densenet-{re.escape(img_type_order)}-(.+)')
+
+    # List to store matching directories with their modification times
+    directories = []
+
+    # Iterate over all directories in the base path
+    for entry in os.scandir(home_out_dir):
+        if entry.is_dir():
+            match = pattern.match(entry.name)
+            if match:
+                # Append directory name and modification time
+                directories.append((entry.name, entry.stat().st_mtime))
+
+    if not directories:
+        return None, None
+
+    # Sort directories by modification time (newest first)
+    directories.sort(key=lambda x: x[1], reverse=True)
+
+    # Get the newest directory
+    newest_dir = directories[0][0]
+
+    # Extract the run id from the directory name
+    run_id = pattern.match(newest_dir).group(1)
+
+    return run_id
+
+def get_checkpoint_path(image_type: str, suffix: str, run_id: str = None):
+    wandb_run_id = run_id if run_id else get_newest_wandb_run_id(f'{image_type}-{suffix}')
+    checkpoint_files = list((home_out_dir / f"mimic/{wandb_run_id}/checkpoints/").glob("*.ckpt"))
+    if not checkpoint_files:
+        raise FileNotFoundError(f"No trained checkpoint found for wandb run id {wandb_run_id}")
+    # If there are multiple checkpoints, select the checkpoint with the latest step
+    checkpoint_file = sorted(checkpoint_files, key=lambda x: int(x.as_posix().split('step=')[1].split('.ckpt')[0]))[-1]
+    return checkpoint_file  # type: Path
+
+class DenseNet(pl.LightningModule):
+    def __init__(self, num_classes):
+        super().__init__()
+        self.num_classes = num_classes
+        self.model = models.densenet121()
+        num_features = self.model.classifier.in_features
+        self.model.classifier = nn.Linear(num_features, self.num_classes)
+
+    def remove_head(self):
+        num_features = self.model.classifier.in_features
+        id_layer = nn.Identity(num_features)
+        self.model.classifier = id_layer
+
+    def forward(self, x):
+        return self.model.forward(x)
+
+    def configure_optimizers(self):
+        params_to_update = []
+        for param in self.parameters():
+            if param.requires_grad == True:
+                params_to_update.append(param)
+        optimizer = torch.optim.Adam(params_to_update, lr=0.001)
+        return optimizer
+
+    def unpack_batch(self, batch):
+        return batch['image'], batch['label']
+
+    def process_batch(self, batch):
+        img, lab = self.unpack_batch(batch)
+        out = self.forward(img)
+        prob = torch.sigmoid(out)
+        loss = F.binary_cross_entropy(prob, lab)
+        return loss
+
+    def training_step(self, batch, batch_idx):
+        loss = self.process_batch(batch)
+        self.log('train_loss', loss)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        loss = self.process_batch(batch)
+        self.log('val_loss', loss)
+
+    def test_step(self, batch, batch_idx):
+        loss = self.process_batch(batch)
+        self.log('test_loss', loss)
+
+def standardize_mimic_ethnicity(df):
+    # Mapping of original ethnicities to standardized categories
+    ethnicity_mapping = {
+        "WHITE": "White",
+        "WHITE - OTHER EUROPEAN": "White",
+        "WHITE - RUSSIAN": "White",
+        "WHITE - EASTERN EUROPEAN": "White",
+        "WHITE - BRAZILIAN": "White",
+        "BLACK/AFRICAN AMERICAN": "Black",
+        "BLACK/CAPE VERDEAN": "Black",
+        "BLACK/CARIBBEAN ISLAND": "Black",
+        "BLACK/AFRICAN": "Black",
+        "ASIAN": "Asian",
+        "ASIAN - CHINESE": "Asian",
+        "ASIAN - SOUTH EAST ASIAN": "Asian",
+        "ASIAN - ASIAN INDIAN": "Asian",
+        "ASIAN - KOREAN": "Asian",
+        "HISPANIC/LATINO - PUERTO RICAN": "Hispanic/Latino",
+        "HISPANIC/LATINO - DOMINICAN": "Hispanic/Latino",
+        "HISPANIC/LATINO - GUATEMALAN": "Hispanic/Latino",
+        "HISPANIC/LATINO - SALVADORAN": "Hispanic/Latino",
+        "HISPANIC OR LATINO": "Hispanic/Latino",
+        "HISPANIC/LATINO - MEXICAN": "Hispanic/Latino",
+        "HISPANIC/LATINO - HONDURAN": "Hispanic/Latino",
+        "HISPANIC/LATINO - CUBAN": "Hispanic/Latino",
+        "HISPANIC/LATINO - COLUMBIAN": "Hispanic/Latino",
+        "HISPANIC/LATINO - CENTRAL AMERICAN": "Hispanic/Latino",
+        "SOUTH AMERICAN": "Hispanic/Latino",
+        "NATIVE HAWAIIAN OR OTHER PACIFIC ISLANDER": "Asian",
+        "AMERICAN INDIAN/ALASKA NATIVE": "Other",
+        "MULTIPLE RACE/ETHNICITY": "Other",
+        "OTHER": "Other",
+        "UNKNOWN": "Other",
+        "UNABLE TO OBTAIN": "Other",
+        "PATIENT DECLINED TO ANSWER": "Other",
+        "PORTUGUESE": "Other"
+    }
+
+    df['ethnicity'] = df['ethnicity'].map(ethnicity_mapping)
+
+    return df
