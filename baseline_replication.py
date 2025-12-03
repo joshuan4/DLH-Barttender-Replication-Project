@@ -443,23 +443,26 @@ def run_xgboost(X_train, X_test, Y_train, Y_test):
         'feature_importance': feature_importance
     }
 
-def run_xgboost_cv(X_train, X_test, Y_train, Y_test, n_folds=10):
+def run_xgboost_cv(X_train, X_test, Y_train, Y_test, n_splits=10):
     """
     Collect XGBoost metrics across K-fold resamples of the training data (no leakage),
     while evaluating on the same test set.
     """
 
+    from sklearn.model_selection import StratifiedKFold
+    import numpy as np
+
     print("\n" + "="*80)
-    print(f"Running XGBoost {n_folds}-Fold Resamples on Training Set → Evaluate on Fixed Test")
+    print(f"Running XGBoost {n_splits}-Fold Resamples on Training Set → Evaluate on Fixed Test")
     print("="*80)
 
     # KFold splits on train only
-    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
 
     fold_metrics = []
 
     for i, (train_idx, val_idx) in enumerate(skf.split(X_train, Y_train)):
-        print(f"\n--- Fold {i+1}/{n_folds} ---")
+        print(f"\n--- Fold {i+1}/{n_splits} ---")
 
         res = run_xgboost(
             X_train.iloc[train_idx],
@@ -505,7 +508,6 @@ def run_xgboost_cv(X_train, X_test, Y_train, Y_test, n_folds=10):
         "mcc": fold_metrics[:,2].mean(),
         "mcc_std":  fold_metrics[:,2].std(),
     }
-
 
 
 """
