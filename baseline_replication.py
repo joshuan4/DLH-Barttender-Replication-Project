@@ -9,7 +9,7 @@ import torch.nn as nn
 import pytorch_lightning as pl
 import torch.nn.functional as F
 import torchvision.models as models
-from sklearn.model_selection import train_test_split, KFold
+from sklearn.model_selection import train_test_split, KFold, StratifiedKFold
 from pathlib import Path
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
@@ -443,6 +443,69 @@ def run_xgboost(X_train, X_test, Y_train, Y_test):
         'feature_importance': feature_importance
     }
 
+def run_xgboost_cv(X_train, X_test, Y_train, Y_test, n_folds=10):
+    """
+    Collect XGBoost metrics across K-fold resamples of the training data (no leakage),
+    while evaluating on the same test set.
+    """
+
+    print("\n" + "="*80)
+    print(f"Running XGBoost {n_folds}-Fold Resamples on Training Set → Evaluate on Fixed Test")
+    print("="*80)
+
+    # KFold splits on train only
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+
+    fold_metrics = []
+
+    for i, (train_idx, val_idx) in enumerate(skf.split(X_train, Y_train)):
+        print(f"\n--- Fold {i+1}/{n_folds} ---")
+
+        res = run_xgboost(
+            X_train.iloc[train_idx],
+            X_train.iloc[val_idx],
+            Y_train.iloc[train_idx],
+            Y_train.iloc[val_idx],
+        )
+
+        # Evaluate best fold model on fixed test set
+        model = res['model']
+        y_pred_prob = model.predict_proba(X_test)[:, 1]
+        y_pred = model.predict(X_test)
+
+        from sklearn.metrics import roc_auc_score, f1_score, matthews_corrcoef, confusion_matrix
+
+        auc_test = roc_auc_score(Y_test, y_pred_prob)
+        f1_test  = f1_score(Y_test, y_pred)
+        mcc_test = matthews_corrcoef(Y_test, y_pred)
+        cm_test  = confusion_matrix(Y_test, y_pred)
+
+        print(f"  Test AUC: {auc_test:.4f}")
+        print(f"  Test F1:  {f1_test:.4f}")
+        print(f"  Test MCC: {mcc_test:.4f}")
+
+        fold_metrics.append([auc_test, f1_test, mcc_test])
+        fold_metrics.append([auc_test, f1_test, mcc_test, cm_test])
+
+    fold_metrics = np.array([[m[0], m[1], m[2]] for m in fold_metrics])
+
+    print("\n" + "-"*80)
+    print("Summary (evaluated on fixed test set):")
+    print("-"*80)
+    print(f"  AUC-ROC: {fold_metrics[:,0].mean():.4f} ± {fold_metrics[:,0].std():.4f}")
+    print(f"  F1:      {fold_metrics[:,1].mean():.4f} ± {fold_metrics[:,1].std():.4f}")
+    print(f"  MCC:     {fold_metrics[:,2].mean():.4f} ± {fold_metrics[:,2].std():.4f}")
+    print("\n")
+
+    return {
+        "auc": fold_metrics[:,0].mean(),
+        "auc_std":  fold_metrics[:,0].std(),
+        "f1":  fold_metrics[:,1].mean(),
+        "f1_std":   fold_metrics[:,1].std(),
+        "mcc": fold_metrics[:,2].mean(),
+        "mcc_std":  fold_metrics[:,2].std(),
+    }
+
 
 
 """
@@ -460,7 +523,7 @@ X_train, X_test, Y_train, Y_test, feature_cols = prepare_data(
 
 # Replicate by using average across 10-folds for logistic
 results['Logistic Regression, Tabular Data'] = run_logistic_regression(X_train, X_test, Y_train, Y_test, n_splits=10)
-results['XGBoost, Tabular Data'] = run_xgboost(X_train, X_test, Y_train, Y_test)
+results['XGBoost, Tabular Data'] = run_xgboost_cv(X_train, X_test, Y_train, Y_test, n_splits=10)
 
 # Prepare data for the "Image Biomarkers + Tabular Data" runs (same except addition of two biomarker columns, CTR/CPAT)
 X_train, X_test, Y_train, Y_test, feature_cols = prepare_data(
@@ -469,7 +532,7 @@ X_train, X_test, Y_train, Y_test, feature_cols = prepare_data(
 
 # Replicate by using average across 10-folds for logistic
 results['Logistic Regression, Image Biomarkers + Tabular Data'] = run_logistic_regression(X_train, X_test, Y_train, Y_test, n_splits=10)
-results['XGBoost, Image Biomarkers + Tabular Data'] = run_xgboost(X_train, X_test, Y_train, Y_test)
+results['XGBoost, Image Biomarkers + Tabular Data'] = run_xgboost_cv(X_train, X_test, Y_train, Y_test, n_splits=10)
 
 # Prepare data for the "Image Biomarkers" runs (just two columns, CTR/CPAT)
 X_train, X_test, Y_train, Y_test, feature_cols = prepare_data(
@@ -479,7 +542,7 @@ X_train, X_test, Y_train, Y_test, feature_cols = prepare_data(
 
 # Replicate by using average across 10-folds for logistic
 results['Logistic Regression, Image Biomarkers'] = run_logistic_regression(X_train, X_test, Y_train, Y_test, n_splits=10)
-results['XGBoost, Image Biomarkers'] = run_xgboost(X_train, X_test, Y_train, Y_test)
+results['XGBoost, Image Biomarkers'] = run_xgboost_cv(X_train, X_test, Y_train, Y_test, n_splits=10)
 
 # Summary
 print("\n" + "=" * 80)
@@ -487,6 +550,6 @@ print("Summary")
 print("=" * 80)
 for method_name, result in results.items():
     print(f"{method_name.upper()}:")
-    print(f"  AUC: {result['auc']:.4f}")
-    print(f"  F1:  {result['f1']:.4f}")
-    print(f"  MCC: {result['mcc']:.4f}")
+    print(f"  AUC: {result['auc']:.4f} + {result['auc_std']:.4f}")
+    print(f"  F1:  {result['f1']:.4f} + {result['f1_std']:.4f}")
+    print(f"  MCC: {result['mcc']:.4f} + {result['mcc_std']:.4f}")
