@@ -58,3 +58,7 @@ In order to run all files from our project end-to-end, please run scripts in the
 4. barttender_processing_replication.py
 5. barttender_experiment_replication.py
 
+**Replication Notebook**
+
+The full workflow was execute in a Google Colab notebook environment - see the execution of various preprocessing, training and evaluation steps in BarttenderReplication.ipynb
+
